@@ -6,17 +6,16 @@
 ```mermaid
 ---
 config:
-  theme: default
+  theme: neutral
   themeVariables:
     fontFamily: Inter, Arial
     fontSize: 14px
-    clusterBkg: '#ffffff'
-    clusterBorder: '#d1d5db'
     primaryColor: '#eef2ff'
     primaryBorderColor: '#4f46e5'
     primaryTextColor: '#1f2937'
   layout: fixed
 ---
+
 flowchart LR
  subgraph PH6["Phase 6: Clients & Admin"]
         CLI["Admin CLI<br>cachectl"]
