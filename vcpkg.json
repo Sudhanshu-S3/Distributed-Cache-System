@@ -1,0 +1,12 @@
+{
+  "name": "distributed-cache",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "fmt",
+    "spdlog",
+    "gtest",
+    "benchmark",
+    "asio",
+    "xxhash"
+  ]
+}
