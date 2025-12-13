@@ -1,0 +1,22 @@
+# Build and CMake
+/build/
+/build-*/
+/CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Binaries
+/*.out
+/*.# filepath: /workspaces/Distributed-Cache-System/.gitignore
+# Build and CMake
+/build/
+/build-*/
+/CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Binaries
+/*.out
+/*.
