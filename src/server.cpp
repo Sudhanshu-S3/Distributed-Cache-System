@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <cstring>
+#include <cerrno>
 
 RedisServer::RedisServer(int port) : arena(64* 1024 * 1024)
 {
@@ -82,20 +83,43 @@ void RedisServer::handle_new_connection()
 void RedisServer::handle_client_data(int fd)
 {
     ClientBuffer& buf = client_buffers[fd];
-    
-    // Read new data into buffer
-    int bytes = read(fd, buf.data + buf.len, sizeof(buf.data) - buf.len);
-    
-    if (bytes <= 0)
+
+    // Drain the socket so edge-triggered epoll does not leave unread bytes queued.
+    while (buf.len < sizeof(buf.data))
     {
+        ssize_t bytes = read(fd, buf.data + buf.len, sizeof(buf.data) - buf.len);
+
+        if (bytes > 0)
+        {
+            buf.len += static_cast<size_t>(bytes);
+            continue;
+        }
+
+        if (bytes == 0)
+        {
+            std::cout << "Client disconnected: " << fd << std::endl;
+            epoll_ctl(epoll_fd.get(), EPOLL_CTL_DEL, fd, nullptr);
+            clients.erase(fd);
+            client_buffers.erase(fd);
+            return;
+        }
+
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+        {
+            break;
+        }
+
+        if (errno == EINTR)
+        {
+            continue;
+        }
+
         std::cout << "Client disconnected: " << fd << std::endl;
         epoll_ctl(epoll_fd.get(), EPOLL_CTL_DEL, fd, nullptr);
         clients.erase(fd);
         client_buffers.erase(fd);
         return;
     }
-    
-    buf.len += bytes;
     
     // Process all complete commands in buffer
     RESPParser parser(buf.data, buf.len);
