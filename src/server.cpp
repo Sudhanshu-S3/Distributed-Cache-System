@@ -75,7 +75,10 @@ void RedisServer::handle_new_connection()
     clients[raw_client_fd] = std::make_unique<Socket>(raw_client_fd);
     
     // Initialize buffer
-    client_buffers[raw_client_fd] = ClientBuffer{};
+    ClientBuffer cb;
+    cb.data.resize(INITIAL_BUF);
+    client_buffers[raw_client_fd] = std::move(cb);
+
     
     std::cout << "New client connected: " << raw_client_fd << std::endl;
 }
@@ -85,17 +88,30 @@ void RedisServer::handle_client_data(int fd)
     ClientBuffer& buf = client_buffers[fd];
 
     // Drain the socket so edge-triggered epoll does not leave unread bytes queued.
-    while (buf.len < sizeof(buf.data))
+    while (true) 
     {
-        ssize_t bytes = read(fd, buf.data + buf.len, sizeof(buf.data) - buf.len);
+        if (buf.len == buf.data.size()) 
+        {
+            if (buf.data.size() >= MAX_BUF) 
+            {
+                // Pathological client — close instead of OOMing
+                std::cout << "Client exceeded MAX_BUF, closing: " << fd << std::endl;
+                epoll_ctl(epoll_fd.get(), EPOLL_CTL_DEL, fd, nullptr);
+                clients.erase(fd);
+                client_buffers.erase(fd);
+                return;
+            }
+            buf.data.resize(std::min(buf.data.size() * 2, MAX_BUF));
+        }
 
-        if (bytes > 0)
+        ssize_t bytes = read(fd, buf.data.data() + buf.len, buf.data.size() - buf.len);
+
+        if (bytes > 0) 
         {
             buf.len += static_cast<size_t>(bytes);
             continue;
         }
-
-        if (bytes == 0)
+        if (bytes == 0) 
         {
             std::cout << "Client disconnected: " << fd << std::endl;
             epoll_ctl(epoll_fd.get(), EPOLL_CTL_DEL, fd, nullptr);
@@ -103,26 +119,18 @@ void RedisServer::handle_client_data(int fd)
             client_buffers.erase(fd);
             return;
         }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+        if (errno == EINTR) continue;
 
-        if (errno == EAGAIN || errno == EWOULDBLOCK)
-        {
-            break;
-        }
-
-        if (errno == EINTR)
-        {
-            continue;
-        }
-
-        std::cout << "Client disconnected: " << fd << std::endl;
+        std::cout << "Client read error: " << fd << std::endl;
         epoll_ctl(epoll_fd.get(), EPOLL_CTL_DEL, fd, nullptr);
         clients.erase(fd);
         client_buffers.erase(fd);
         return;
     }
-    
+
     // Process all complete commands in buffer
-    RESPParser parser(buf.data, buf.len);
+    RESPParser parser(buf.data.data(), buf.len);
     std::vector<std::string_view> tokens;
 
     std::string response_buffer; 
@@ -136,8 +144,14 @@ void RedisServer::handle_client_data(int fd)
         {
             if (parser.pos > 0) 
             {
-                memmove(buf.data, buf.data + parser.pos, buf.len - parser.pos);
+                memmove(buf.data.data(), buf.data.data() + parser.pos, buf.len - parser.pos);
                 buf.len -= parser.pos;
+
+                if (buf.data.size() > INITIAL_BUF && buf.len <= INITIAL_BUF / 2) {
+                    buf.data.resize(INITIAL_BUF);
+                    buf.data.shrink_to_fit();
+                }
+
             }
             break;
         }
