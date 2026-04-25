@@ -1,177 +1,140 @@
-# FlashCache: 700k+ RPS High-Frequency Key-Value Store
+# FlashCache
 
-![Build Status](https://img.shields.io/badge/build-passing-brightgreen) ![Language](https://img.shields.io/badge/language-C%2B%2B20-blue) ![License](https://img.shields.io/badge/license-MIT-green)
+A small in-memory key-value server in C++. Speaks the Redis RESP protocol
+over TCP. Single-threaded, epoll-based. Supports `PING`, `SET`, `GET`.
 
-FlashCache is a single-threaded, event-driven key-value store engineered for **ultra-low latency** and **high throughput**. 
+Built as a learning project, then benchmarked against a real Redis-compatible
+server to see how close a single-developer implementation can get.
 
-Built from scratch in C++20, it leverages **kernel-bypass concepts (Epoll)** and **custom memory allocation (Arena)** to process over **763,000 requests per second** on a single core—outperforming standard Redis (~100k RPS) by **7x** on local benchmarks.
+## Performance
 
-Whitepaper: [FlashCache Whitepaper](/docs/FlashCache_Whitepaper.pdf)
+Tested against `redis-server` (actually Valkey 8.0.7, the open-source fork
+of Redis after the license change — same protocol, same `redis-benchmark`
+client) on the same machine. Both servers pinned to a CPU core. Persistence
+on the comparison server was disabled (`--save "" --appendonly no`) so the
+comparison is on the same code path: parse a RESP command, look up a key,
+write the reply.
 
-Benchmark Test: [Video](/docs/benchmark.mp4)
+### Throughput (requests/sec, median of 3 runs)
 
-## Performance Benchmarks
+| Workload                      |  FlashCache |   Valkey |
+|-------------------------------|------------:|---------:|
+| SET 8 B,  50 clients          |      79,662 |   82,474 |
+| GET 8 B,  50 clients          |      80,887 |   79,536 |
+| SET 8 B, 500 clients          |      69,901 |   76,225 |
+| GET 8 B, 500 clients          |      75,222 |   70,781 |
+| SET 8 B,  pipeline 16         |   1,222,494 | 1,104,972|
+| GET 8 B,  pipeline 16         |   1,228,501 | 1,215,067|
+| SET 1 KB, 50 clients          |      81,566 |   71,633 |
+| GET 1 KB, 50 clients          |      81,136 |   80,873 |
+| SET 64 KB, 50 clients         |      37,037 |   37,908 |
 
-**Test Environment:**
-- **Hardware:** AMD Ryzen 5 5600H, 16GB RAM
-- **OS:** Fedora Linux 42 (Workstation Edition)
-- **Tool:** redis-benchmark
-- **Configuration:** 50 parallel clients, 100,000 requests per test
+FlashCache matches Valkey within ±5% on most workloads, and is about 11%
+faster on pipelined writes. The 1 KB SET row is partly real and partly
+Valkey-side variance (Valkey's three SET runs at 1 KB were 57k / 72k / 82k;
+FlashCache's were stable at 80–82k). Run-to-run variance on this hardware
+is around 3–5%.
 
-### Throughput Performance
+### Latency (ms, GET 8 B, 50 clients, 1 M requests)
 
-| Test Scenario | SET (req/s) | GET (req/s) | Average (req/s) |
-|:---|---:|---:|---:|
-| **No Pipelining (3B payload)** | 79,618 | 79,745 | **79,682** |
-| **Pipelining P=10 (3B payload)** | 787,402 | 751,880 | **769,641** |
-| **No Pipelining (256B payload)** | 79,302 | 78,989 | **79,146** |
-| **Pipelining P=10 (256B payload)** | 746,269 | 746,269 | **746,269** |
+|         | FlashCache | Valkey |
+|---------|-----------:|-------:|
+| p50     |       0.31 |   0.31 |
+| p99.2   |       0.36 |   0.42 |
+| p99.9   |       0.46 |   0.52 |
+| max     |       0.86 |   2.68 |
 
-### Latency Distribution (milliseconds)
+p50 is identical. FlashCache has a smaller tail — p99.9 is about 12%
+lower, worst-case is roughly 3× lower. The likely reason is that Valkey
+pauses briefly for background work (key-expiration sampling, slowlog,
+dirty-page tracking) that FlashCache simply doesn't have to do.
 
-**Without Pipelining (Optimal Latency):**
-| Operation | P50 | P95 | P99 | P99.9 |
-|:---|---:|---:|---:|---:|
-| **SET** | 0.327 | 0.351 | 0.431 | 0.543 |
-| **GET** | 0.327 | 0.351 | 0.399 | 0.463 |
+## What's not implemented
 
-**With Pipelining P=10 (Maximum Throughput):**
-| Operation | P50 | P95 | P99 | P99.9 |
-|:---|---:|---:|---:|---:|
-| **SET** | 0.327 | 0.383 | 0.575 | 1.111 |
-| **GET** | 0.335 | 0.463 | 0.503 | 0.663 |
+This is a focused subset. The fair comparison above is fair only because
+both servers are doing the same work on `SET` / `GET`. Valkey/Redis has
+all of these and FlashCache does not:
 
+- Persistence (RDB or AOF)
+- Replication, clustering
+- TTL / expiration / eviction
+- Other data types (hashes, lists, sets, sorted sets)
+- Scripting, pub/sub, streams
 
-## Core Architecture
+Some of the latency wins above are because FlashCache isn't carrying the
+overhead of those features. That's the honest read.
 
-```mermaid
+## How it works
 
-%%{init: {
-    "theme": "default",
-    "themeVariables": {
-        "background": "#ffffff",
-        "clusterBkg": "#ffffff",
-        "clusterBorder": "#343434" ,
+- Single thread, single epoll loop, edge-triggered
+- One read buffer per client, grows on demand from 8 KB up to a 64 MB cap
+- One write buffer per client; `EPOLLOUT` is armed only when the kernel
+  send buffer fills, so partial writes don't drop bytes
+- RESP parser with bounds checking and explicit protocol-error close
+- Heterogeneous-aware lookups: `SET` / `GET` use `string_view` against the
+  underlying `unordered_map<std::string, std::string>` to avoid extra
+  string copies on the hot path
+- Graceful shutdown via `signalfd` on `SIGINT` / `SIGTERM`
 
-        "primaryColor": "#ffffff",
-        "primaryColorLight": "#ffffff",
-        "primaryColorDark": "#ffffff"
-    }
-}}%%
-flowchart LR
-    %% Subgraph: The External World
-    subgraph Clients["Phase 1: Clients"]
-        CLI["redis-benchmark / redis-cli"]
-        SDK["TCP Clients"]
-    end
+## Build and run
 
-    %% Subgraph: The Engine (Your C++ Code)
-    subgraph Engine["FlashCache: Single-Threaded Core"]
-       
-        %% Networking Layer
-        subgraph Net["Network Layer (Zero-Copy)"]
-            EPOLL["Epoll Event Loop<br>(Edge Triggered)"]
-            READ["Read Buffer<br>(Per-Client Accumulation)"]
-            PARSER["RESP Parser<br>(std::string_view)"]
-        end
-        
-        %% Execution Layer
-        subgraph Core["Execution Engine (No Locks)"]
-            DISPATCH["Command Dispatcher<br>(Pipelined Loop)"]
-            LOGIC["SET / GET Logic"]
-        end
-        
-        %% Memory Layer
-        subgraph Mem["Memory Management (O(1))"]
-            MAP["Hash Map<br>(std::unordered_map)"]
-            ARENA["Linear Arena Allocator<br>(Append-Only 64MB)"]
-        end
-       
-        %% Output Layer
-        subgraph Out["Write Path"]
-            BATCH["Write Batcher<br>(Response Aggregation)"]
-        end
-    end
-
-    %% Flows
-    CLI -- "TCP Packets (Pipeline)" --> EPOLL
-    EPOLL -- "Notification" --> READ
-    READ -- "Raw Bytes" --> PARSER
-    PARSER -- "Tokens (Views)" --> DISPATCH
-   
-    DISPATCH -- "Execute" --> LOGIC
-    LOGIC -- "Read/Write" --> MAP
-   
-    MAP -- "Store Value" --> ARENA
-    ARENA -- "Pointer" --> MAP
-   
-    LOGIC -- "Response" --> BATCH
-    BATCH -- "Single send() syscall" --> Clients
-
-    %% Styling
-
-    classDef client fill:#ffffff,stroke:#0284c7,stroke-width:2px,color:#0f172a
-    classDef net fill:#ffffff,stroke:#16a34a,stroke-width:2px,color:#0f172a
-    classDef core fill:#ffffff,stroke:#ea580c,stroke-width:2px,color:#0f172a
-    classDef mem fill:#ffffff,stroke:#dc2626,stroke-width:2px,color:#0f172a
-
-    class CLI,SDK client
-    class EPOLL,READ,PARSER,BATCH net
-    class DISPATCH,LOGIC core
-    class MAP,ARENA mem
-
-
-```
-
-### 1. Single-Threaded Event Loop (Epoll)
-
-Instead of thread-per-client (Apache style), FlashCache uses Linux Epoll in Edge-Triggered mode.
-
-- Benefit: Zero context-switching overhead.
-- Why: Locks (std::mutex) kill latency. By serializing execution on one core, we keep the CPU instruction cache hot.
-
-### 2. Custom Linear Arena Allocator
-
-Standard malloc is non-deterministic and causes heap fragmentation.
-
-- Solution: A pre-allocated 64MB Arena.
-- Mechanism: Allocation is a simple pointer increment.
-- Result: Elimination of malloc overhead on the hot path.
-
-### 3. Zero-Copy RESP Parser
-Standard parsers copy bytes into std::string objects.
-
-- Solution: A custom parser using std::string_view.
-- Benefit: Zero heap allocations during packet processing. We strictly point to the raw read buffer.
-
-## Build and Run
-
-Requirements: Linux, C++20 Compiler (GCC/Clang), CMake.
 ```bash
-#1. Clone
-git clone https://github.com/Sudhanshu-S3/FlashCache.git
-cd Flash-Cache
-
-# 2. Build (Release Mode for Max Speed)
-mkdir build && cd build
-cmake -DCMAKE_BUILD_TYPE=Release ..
-make
-
-# 3. Run Server
-./flash_cache
-
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+./build/flash_cache       # listens on 6379
 ```
+
+Then in another shell:
+
+```bash
+redis-cli -p 6379 SET foo bar
+redis-cli -p 6379 GET foo
+```
+
+Requires: Linux, gcc/clang with C++20, CMake.
 
 ## Testing
-Unit tests are implemented using Google Test to ensure reliability of the Arena allocator and Parser logic.
 
 ```bash
-# Run the test suite
-./flash_test
+./build/flash_test        # gtest suite (parser, etc.)
 ```
 
-## Future Roadmap
+## Reproduce the benchmarks
 
-- Slab Allocation: Upgrade Arena to allow freeing memory (Bitmap-based reuse).
-- Snapshotting: Asynchronous persistence (RDB style) using fork().
-- Cluster Mode: Consistent Hashing for horizontal scaling.
+```bash
+sudo cpupower frequency-set -g performance
+pkill -9 flash_cache redis-server 2>/dev/null
+
+taskset -c 2 ./build/flash_cache > /tmp/fc.log 2>&1 &
+redis-server --port 6380 --daemonize yes --save "" --appendonly no
+sleep 0.5
+
+./bench.sh > results.csv          # 5 workloads x 2 servers x 3 runs
+cat results.csv
+
+pkill flash_cache
+redis-cli -p 6380 shutdown nosave
+```
+
+`bench.sh` runs `redis-benchmark` pinned to core 4 against both servers
+across the workload matrix. The server is pinned to core 2.
+
+## Test environment
+
+- CPU: AMD Ryzen 5 5600H (12 logical cores, performance governor)
+- Server pinned to core 2, client pinned to core 4 (`taskset`)
+- OS: Fedora Linux 42 (kernel 6.19.11)
+- Compiler: gcc 15.2.1, `-O3 -march=native`
+- CMake: 3.31.11
+- Comparison server: Valkey 8.0.7 (`redis-server --version` output)
+
+## Roadmap
+
+- `DEL` and TTL / expiration
+- Eviction policy when memory bound is hit
+- Slab allocator (driven by profiling, not speculation)
+- Multi-threaded I/O via `SO_REUSEPORT`
+
+## License
+
+MIT — see [LICENSE](LICENSE).
