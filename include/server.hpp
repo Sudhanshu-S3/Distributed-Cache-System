@@ -6,6 +6,7 @@
 #include <string_view>
 #include <memory>
 #include <fcntl.h>
+#include <vector>
 
 
 class RedisServer
@@ -17,10 +18,12 @@ private:
     Arena arena;
     std::unordered_map<std::string, std::string> store;
     std::unordered_map<int, std::unique_ptr<Socket>> clients;
+    static constexpr size_t INITIAL_BUF = 8 * 1024;
+    static constexpr size_t MAX_BUF     = 64 * 1024 * 1024;
     
     struct ClientBuffer 
     {
-        char data[8192];
+        std::vector<char> data;
         size_t len = 0;
         std::string write_buf;
         size_t write_pos = 0;
