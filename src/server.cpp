@@ -8,9 +8,28 @@
 #include <unistd.h>
 #include <cstring>
 #include <cerrno>
+#include <csignal>
+#include <sys/signalfd.h>
 
 RedisServer::RedisServer(int port)
 {
+    // 0. Block SIGINT/SIGTERM so we can receive them via signalfd
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGINT);
+    sigaddset(&mask, SIGTERM);
+    if (sigprocmask(SIG_BLOCK, &mask, nullptr) == -1)
+    {
+        throw std::runtime_error("sigprocmask failed");
+    }
+
+    int raw_signal_fd = signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
+    if (raw_signal_fd == -1)
+    {
+        throw std::runtime_error("signalfd creation failed");
+    }
+    signal_fd = Socket(raw_signal_fd);
+
     // 1. Create Socket
     int raw_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (raw_fd == -1)
@@ -18,7 +37,7 @@ RedisServer::RedisServer(int port)
         throw std::runtime_error("Socket creation failed");
     }
     server_socket = Socket(raw_fd);
-    
+
     // 2. Bind & Listen
     struct sockaddr_in address{};
     address.sin_family = AF_INET;
@@ -27,12 +46,12 @@ RedisServer::RedisServer(int port)
 
     int opt = 1;
     setsockopt(server_socket.get(), SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    
+
     if (bind(server_socket.get(), (struct sockaddr*)&address, sizeof(address)) == -1)
     {
         throw std::runtime_error("Bind failed");
     }
-    
+
     listen(server_socket.get(), SOMAXCONN);
     set_nonblocking(server_socket.get());
 
@@ -43,15 +62,22 @@ RedisServer::RedisServer(int port)
         throw std::runtime_error("Epoll creation failed");
     }
     epoll_fd = Socket(raw_epoll);
-    
+
     // 4. Add Server to Epoll
     struct epoll_event ev{};
     ev.events = EPOLLIN;
     ev.data.fd = server_socket.get();
     epoll_ctl(epoll_fd.get(), EPOLL_CTL_ADD, server_socket.get(), &ev);
-    
+
+    // 5. Add Signalfd to Epoll
+    struct epoll_event sig_ev{};
+    sig_ev.events = EPOLLIN;
+    sig_ev.data.fd = signal_fd.get();
+    epoll_ctl(epoll_fd.get(), EPOLL_CTL_ADD, signal_fd.get(), &sig_ev);
+
     std::cout << "Server (RAII) listening on port " << port << std::endl;
 }
+
 
 
 void RedisServer::handle_new_connection()
@@ -214,27 +240,47 @@ void RedisServer::handle_client_data(int fd)
 
 void RedisServer::run()
 {
-    struct epoll_event events[10];
-    
-    while (true)
-    {
-        int nfds = epoll_wait(epoll_fd.get(), events, 10, -1);
-        
-        for (int i = 0; i < nfds; ++i)
-        {
-            if (events[i].data.fd == server_socket.get()) 
-            {
-                handle_new_connection();
-            } 
-            else 
-            {
-                if (events[i].events & EPOLLIN)  handle_client_data(events[i].data.fd);
-                if (events[i].events & EPOLLOUT) handle_client_writable(events[i].data.fd);
-            }
+    struct epoll_event events[16];
 
+    while (running)
+    {
+        int nfds = epoll_wait(epoll_fd.get(), events, 16, -1);
+        if (nfds == -1) {
+            if (errno == EINTR) continue;
+            break;
+        }
+
+        for (int i = 0; i < nfds && running; ++i)
+        {
+            int evfd = events[i].data.fd;
+
+            if (evfd == signal_fd.get()) {
+                struct signalfd_siginfo si;
+                ssize_t r = read(signal_fd.get(), &si, sizeof(si));
+                (void)r;
+                std::cout << "Received signal " << si.ssi_signo
+                          << ", shutting down" << std::endl;
+                running = false;
+                break;
+            }
+            else if (evfd == server_socket.get()) {
+                handle_new_connection();
+            }
+            else {
+                if (events[i].events & EPOLLIN)  handle_client_data(evfd);
+                if (events[i].events & EPOLLOUT) handle_client_writable(evfd);
+            }
         }
     }
+
+    // Best-effort flush of pending writes before sockets close
+    for (auto& kv : client_buffers) {
+        try_flush(kv.first);
+    }
+
+    std::cout << "Shutdown complete" << std::endl;
 }
+
 
 void RedisServer::try_flush(int fd)
 {

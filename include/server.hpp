@@ -6,7 +6,8 @@
 #include <memory>
 #include <fcntl.h>
 #include <vector>
-
+#include <csignal>
+#include <sys/signalfd.h>
 
 class RedisServer
 {
@@ -14,6 +15,8 @@ private:
 
     Socket server_socket;
     Socket epoll_fd;
+    Socket signal_fd;
+    bool running = true;
     std::unordered_map<std::string, std::string> store;
     std::unordered_map<int, std::unique_ptr<Socket>> clients;
     static constexpr size_t INITIAL_BUF = 8 * 1024;
