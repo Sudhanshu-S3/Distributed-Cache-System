@@ -140,9 +140,17 @@ void RedisServer::handle_client_data(int fd)
     {
         size_t consumed = parser.try_parse_command(tokens);
         
-        if (consumed == 0) 
+        if (consumed == 0)
         {
-            if (parser.pos > 0) 
+            if (parser.protocol_error)
+            {
+                std::cout << "Protocol error, closing client: " << fd << std::endl;
+                epoll_ctl(epoll_fd.get(), EPOLL_CTL_DEL, fd, nullptr);
+                clients.erase(fd);
+                client_buffers.erase(fd);
+                return;
+            }
+            if (parser.pos > 0)
             {
                 memmove(buf.data.data(), buf.data.data() + parser.pos, buf.len - parser.pos);
                 buf.len -= parser.pos;
@@ -151,10 +159,10 @@ void RedisServer::handle_client_data(int fd)
                     buf.data.resize(INITIAL_BUF);
                     buf.data.shrink_to_fit();
                 }
-
             }
             break;
         }
+
         
         if (!tokens.empty())
         {
@@ -285,7 +293,7 @@ void RedisServer::arm_epollout(int fd, bool on)
     ClientBuffer& buf = client_buffers[fd];
     if (buf.epollout_armed == on) return;
     struct epoll_event ev{};
-    ev.events = EPOLLIN | EPOLLET | (on ? EPOLLOUT : 0);
+    ev.events = EPOLLIN | EPOLLET | (on ? EPOLLOUT : 0u);
     ev.data.fd = fd;
     epoll_ctl(epoll_fd.get(), EPOLL_CTL_MOD, fd, &ev);
     buf.epollout_armed = on;
