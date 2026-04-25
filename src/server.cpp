@@ -240,11 +240,12 @@ void RedisServer::handle_client_data(int fd)
 
 void RedisServer::run()
 {
-    struct epoll_event events[16];
+    static constexpr int MAX_EPOLL_EVENTS = 1024;
+    struct epoll_event events[MAX_EPOLL_EVENTS];
 
     while (running)
     {
-        int nfds = epoll_wait(epoll_fd.get(), events, 16, -1);
+        int nfds = epoll_wait(epoll_fd.get(), events, MAX_EPOLL_EVENTS, -1);
         if (nfds == -1) {
             if (errno == EINTR) continue;
             break;
