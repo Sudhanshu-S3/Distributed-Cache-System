@@ -46,15 +46,25 @@ RedisServer::RedisServer(int port)
     address.sin_port = htons(port);
 
     int opt = 1;
-    setsockopt(server_socket.get(), SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    if (setsockopt(server_socket.get(), SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1)
+    {
+        throw std::runtime_error("setsockopt(SO_REUSEADDR) failed");
+    }
+
 
     if (bind(server_socket.get(), (struct sockaddr*)&address, sizeof(address)) == -1)
     {
         throw std::runtime_error("Bind failed");
     }
 
-    listen(server_socket.get(), SOMAXCONN);
-    set_nonblocking(server_socket.get());
+    if (listen(server_socket.get(), SOMAXCONN) == -1)
+    {
+        throw std::runtime_error("listen failed");
+    }
+    if (!set_nonblocking(server_socket.get()))
+    {
+        throw std::runtime_error("set_nonblocking on listening socket failed");
+    }
 
     // 3. Create Epoll
     int raw_epoll = epoll_create1(0);
@@ -68,13 +78,19 @@ RedisServer::RedisServer(int port)
     struct epoll_event ev{};
     ev.events = EPOLLIN;
     ev.data.fd = server_socket.get();
-    epoll_ctl(epoll_fd.get(), EPOLL_CTL_ADD, server_socket.get(), &ev);
+    if (epoll_ctl(epoll_fd.get(), EPOLL_CTL_ADD, server_socket.get(), &ev) == -1)
+    {
+        throw std::runtime_error("epoll_ctl ADD listening socket failed");
+    }
 
     // 5. Add Signalfd to Epoll
     struct epoll_event sig_ev{};
     sig_ev.events = EPOLLIN;
     sig_ev.data.fd = signal_fd.get();
-    epoll_ctl(epoll_fd.get(), EPOLL_CTL_ADD, signal_fd.get(), &sig_ev);
+    if (epoll_ctl(epoll_fd.get(), EPOLL_CTL_ADD, signal_fd.get(), &sig_ev) == -1)
+    {
+        throw std::runtime_error("epoll_ctl ADD signalfd failed");
+    }
 
     std::cout << "Server (RAII) listening on port " << port << std::endl;
 }
@@ -90,19 +106,28 @@ void RedisServer::handle_new_connection()
     if (raw_client_fd == -1)
         return;
 
-    set_nonblocking(raw_client_fd);
-    
-    // Add to epoll
+    if (!set_nonblocking(raw_client_fd))
+    {
+        std::cout << "set_nonblocking failed for client " << raw_client_fd << ", closing\n";
+        close(raw_client_fd);
+        return;
+    }
+
     struct epoll_event ev{};
     ev.events = EPOLLIN | EPOLLET;
     ev.data.fd = raw_client_fd;
-    epoll_ctl(epoll_fd.get(), EPOLL_CTL_ADD, raw_client_fd, &ev);
-    
-    // Store in RAII wrapper
+    if (epoll_ctl(epoll_fd.get(), EPOLL_CTL_ADD, raw_client_fd, &ev) == -1)
+    {
+        std::cout << "epoll_ctl ADD failed for client " << raw_client_fd << ", closing\n";
+        close(raw_client_fd);
+        return;
+    }
+
     ClientBuffer cb;
     cb.socket = Socket(raw_client_fd);
     cb.data.resize(INITIAL_BUF);
     clients[raw_client_fd] = std::move(cb);
+
 
 
     
@@ -122,7 +147,12 @@ void RedisServer::handle_client_data(int fd)
             {
                 // Pathological client — close instead of OOMing
                 std::cout << "Client exceeded MAX_BUF, closing: " << fd << std::endl;
-                epoll_ctl(epoll_fd.get(), EPOLL_CTL_DEL, fd, nullptr);
+                if (epoll_ctl(epoll_fd.get(), EPOLL_CTL_DEL, fd, nullptr) == -1
+                    && errno != ENOENT && errno != EBADF)
+                {
+                    std::cout << "epoll_ctl DEL warning for fd " << fd
+                              << ": errno=" << errno << "\n";
+                }
                 clients.erase(fd);
                 return;
             }
@@ -139,7 +169,12 @@ void RedisServer::handle_client_data(int fd)
         if (bytes == 0) 
         {
             std::cout << "Client disconnected: " << fd << std::endl;
-            epoll_ctl(epoll_fd.get(), EPOLL_CTL_DEL, fd, nullptr);
+            if (epoll_ctl(epoll_fd.get(), EPOLL_CTL_DEL, fd, nullptr) == -1
+                && errno != ENOENT && errno != EBADF)
+            {
+                std::cout << "epoll_ctl DEL warning for fd " << fd
+                          << ": errno=" << errno << "\n";
+            }
             clients.erase(fd);
             return;
         }
@@ -147,7 +182,12 @@ void RedisServer::handle_client_data(int fd)
         if (errno == EINTR) continue;
 
         std::cout << "Client read error: " << fd << std::endl;
-        epoll_ctl(epoll_fd.get(), EPOLL_CTL_DEL, fd, nullptr);
+        if (epoll_ctl(epoll_fd.get(), EPOLL_CTL_DEL, fd, nullptr) == -1
+            && errno != ENOENT && errno != EBADF)
+        {
+            std::cout << "epoll_ctl DEL warning for fd " << fd
+                      << ": errno=" << errno << "\n";
+        }
         clients.erase(fd);
         return;
     }
@@ -165,7 +205,12 @@ void RedisServer::handle_client_data(int fd)
             if (parser.protocol_error)
             {
                 std::cout << "Protocol error, closing client: " << fd << std::endl;
-                epoll_ctl(epoll_fd.get(), EPOLL_CTL_DEL, fd, nullptr);
+                if (epoll_ctl(epoll_fd.get(), EPOLL_CTL_DEL, fd, nullptr) == -1
+                    && errno != ENOENT && errno != EBADF)
+                {
+                    std::cout << "epoll_ctl DEL warning for fd " << fd
+                              << ": errno=" << errno << "\n";
+                }
                 clients.erase(fd);
                 return;
             }
@@ -307,7 +352,12 @@ void RedisServer::try_flush(int fd)
         }
         // real error - close connection
 
-        epoll_ctl( epoll_fd.get(), EPOLL_CTL_DEL, fd, nullptr);
+        if (epoll_ctl(epoll_fd.get(), EPOLL_CTL_DEL, fd, nullptr) == -1
+            && errno != ENOENT && errno != EBADF)
+        {
+            std::cout << "epoll_ctl DEL warning for fd " << fd
+                      << ": errno=" << errno << "\n";
+        }
         clients.erase(fd);
         return;
     }
@@ -324,8 +374,14 @@ void RedisServer::arm_epollout(int fd, bool on)
     struct epoll_event ev{};
     ev.events = EPOLLIN | EPOLLET | (on ? EPOLLOUT : 0u);
     ev.data.fd = fd;
-    epoll_ctl(epoll_fd.get(), EPOLL_CTL_MOD, fd, &ev);
+    if (epoll_ctl(epoll_fd.get(), EPOLL_CTL_MOD, fd, &ev) == -1)
+    {
+        std::cout << "epoll_ctl MOD failed for fd " << fd << ", closing client\n";
+        clients.erase(fd);   // Socket destructor closes the fd
+        return;
+    }
     buf.epollout_armed = on;
+
 }
 
 void RedisServer::handle_client_writable(int fd)

@@ -35,10 +35,11 @@ private:
     std::unordered_map<int, ClientBuffer> clients;
 
     //  Set Non-Blocking
-    void set_nonblocking(int fd)
+    bool set_nonblocking(int fd)
     {
         int flags = fcntl(fd, F_GETFL, 0);
-        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        if (flags == -1) return false;
+        return fcntl(fd, F_SETFL, flags | O_NONBLOCK) != -1;
     }
 
     void handle_new_connection();
