@@ -98,12 +98,11 @@ void RedisServer::handle_new_connection()
     epoll_ctl(epoll_fd.get(), EPOLL_CTL_ADD, raw_client_fd, &ev);
     
     // Store in RAII wrapper
-    clients[raw_client_fd] = std::make_unique<Socket>(raw_client_fd);
-    
-    // Initialize buffer
     ClientBuffer cb;
+    cb.socket = Socket(raw_client_fd);
     cb.data.resize(INITIAL_BUF);
-    client_buffers[raw_client_fd] = std::move(cb);
+    clients[raw_client_fd] = std::move(cb);
+
 
     
     std::cout << "New client connected: " << raw_client_fd << std::endl;
@@ -111,7 +110,7 @@ void RedisServer::handle_new_connection()
 
 void RedisServer::handle_client_data(int fd)
 {
-    ClientBuffer& buf = client_buffers[fd];
+    ClientBuffer& buf = clients[fd];
 
     // Drain the socket so edge-triggered epoll does not leave unread bytes queued.
     while (true) 
@@ -124,7 +123,6 @@ void RedisServer::handle_client_data(int fd)
                 std::cout << "Client exceeded MAX_BUF, closing: " << fd << std::endl;
                 epoll_ctl(epoll_fd.get(), EPOLL_CTL_DEL, fd, nullptr);
                 clients.erase(fd);
-                client_buffers.erase(fd);
                 return;
             }
             buf.data.resize(std::min(buf.data.size() * 2, MAX_BUF));
@@ -142,7 +140,6 @@ void RedisServer::handle_client_data(int fd)
             std::cout << "Client disconnected: " << fd << std::endl;
             epoll_ctl(epoll_fd.get(), EPOLL_CTL_DEL, fd, nullptr);
             clients.erase(fd);
-            client_buffers.erase(fd);
             return;
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) break;
@@ -151,7 +148,6 @@ void RedisServer::handle_client_data(int fd)
         std::cout << "Client read error: " << fd << std::endl;
         epoll_ctl(epoll_fd.get(), EPOLL_CTL_DEL, fd, nullptr);
         clients.erase(fd);
-        client_buffers.erase(fd);
         return;
     }
 
@@ -173,7 +169,6 @@ void RedisServer::handle_client_data(int fd)
                 std::cout << "Protocol error, closing client: " << fd << std::endl;
                 epoll_ctl(epoll_fd.get(), EPOLL_CTL_DEL, fd, nullptr);
                 clients.erase(fd);
-                client_buffers.erase(fd);
                 return;
             }
             if (parser.pos > 0)
@@ -275,7 +270,7 @@ void RedisServer::run()
     }
 
     // Best-effort flush of pending writes before sockets close
-    for (auto& kv : client_buffers) {
+    for (auto& kv : clients) {
         try_flush(kv.first);
     }
 
@@ -285,8 +280,8 @@ void RedisServer::run()
 
 void RedisServer::try_flush(int fd)
 {
-    auto it = client_buffers.find(fd);
-    if (it == client_buffers.end()) return;
+    auto it = clients.find(fd);
+    if (it == clients.end()) return;
     ClientBuffer& buf = it->second;
 
     while (buf.write_pos < buf.write_buf.size())
@@ -311,7 +306,6 @@ void RedisServer::try_flush(int fd)
 
         epoll_ctl( epoll_fd.get(), EPOLL_CTL_DEL, fd, nullptr);
         clients.erase(fd);
-        client_buffers.erase(fd);
         return;
     }
     //fully drained - reclaim memory and stop watching EPOLLOUT
@@ -322,7 +316,7 @@ void RedisServer::try_flush(int fd)
 
 void RedisServer::arm_epollout(int fd, bool on)
 {
-    ClientBuffer& buf = client_buffers[fd];
+    ClientBuffer& buf = clients[fd];
     if (buf.epollout_armed == on) return;
     struct epoll_event ev{};
     ev.events = EPOLLIN | EPOLLET | (on ? EPOLLOUT : 0u);

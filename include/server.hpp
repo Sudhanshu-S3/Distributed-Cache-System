@@ -16,14 +16,15 @@ private:
     Socket server_socket;
     Socket epoll_fd;
     Socket signal_fd;
-    bool running = true;
+    bool   running = true;
     std::unordered_map<std::string, std::string> store;
-    std::unordered_map<int, std::unique_ptr<Socket>> clients;
+
     static constexpr size_t INITIAL_BUF = 8 * 1024;
     static constexpr size_t MAX_BUF     = 64 * 1024 * 1024;
-    
-    struct ClientBuffer 
+
+    struct ClientBuffer
     {
+        Socket socket;                  // owns the client fd
         std::vector<char> data;
         size_t len = 0;
         std::string write_buf;
@@ -31,7 +32,7 @@ private:
         bool epollout_armed = false;
     };
 
-    std::unordered_map<int, ClientBuffer> client_buffers;
+    std::unordered_map<int, ClientBuffer> clients;
 
     //  Set Non-Blocking
     void set_nonblocking(int fd)
