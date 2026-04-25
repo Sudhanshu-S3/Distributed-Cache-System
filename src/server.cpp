@@ -10,6 +10,7 @@
 #include <cerrno>
 #include <csignal>
 #include <sys/signalfd.h>
+#include <charconv>
 
 RedisServer::RedisServer(int port)
 {
@@ -154,9 +155,6 @@ void RedisServer::handle_client_data(int fd)
     // Process all complete commands in buffer
     RESPParser parser(buf.data.data(), buf.len);
     std::vector<std::string_view> tokens;
-
-    std::string response_buffer; 
-    response_buffer.reserve(4096);
     
     while (true)
     {
@@ -191,12 +189,12 @@ void RedisServer::handle_client_data(int fd)
             
             if (cmd == "PING") 
             {
-                response_buffer.append("+PONG\r\n");
+                buf.write_buf.append("+PONG\r\n");
             }
             else if (cmd == "SET" && tokens.size() >= 3)
             {
                 store[std::string(tokens[1])] = std::string(tokens[2]);
-                response_buffer.append("+OK\r\n");
+                buf.write_buf.append("+OK\r\n");
             }
 
 
@@ -210,26 +208,31 @@ void RedisServer::handle_client_data(int fd)
 
                 if (it != store.end()) {
                     std::string_view val = it->second;
-                    response_buffer.append("$").append(std::to_string(val.length())).append("\r\n");
-                    response_buffer.append(val); // Efficient append
-                    response_buffer.append("\r\n");
+                    char numbuf[24];
+                    auto [end, ec] = std::to_chars(numbuf, numbuf + sizeof(numbuf), val.length());
+                    buf.write_buf.append("$");
+                    buf.write_buf.append(numbuf, end - numbuf);
+                    buf.write_buf.append("\r\n");
+                    buf.write_buf.append(val);
+                    buf.write_buf.append("\r\n");
                 } else {
-                    response_buffer.append("$-1\r\n");
+                    buf.write_buf.append("$-1\r\n");
                 }
+
             }
             else 
             {
-                response_buffer.append("-ERR unknown command\r\n");
+                buf.write_buf.append("-ERR unknown command\r\n");
             }
         }
     }
-            
+    
     // Send everything in ONE System Call
-    if (!response_buffer.empty()) 
+    if (buf.write_pos < buf.write_buf.size())
     {
-        buf.write_buf.append(response_buffer);
         try_flush(fd);
     }
+
 }
 
 
