@@ -9,7 +9,7 @@
 #include <cstring>
 #include <cerrno>
 
-RedisServer::RedisServer(int port) : arena(64* 1024 * 1024)
+RedisServer::RedisServer(int port)
 {
     // 1. Create Socket
     int raw_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -172,27 +172,12 @@ void RedisServer::handle_client_data(int fd)
             {
                 response_buffer.append("+PONG\r\n");
             }
-            else if (cmd == "SET" && tokens.size() >= 3) 
+            else if (cmd == "SET" && tokens.size() >= 3)
             {
-                std::string_view key_view = tokens[1];
-                std::string_view val_view = tokens[2];
-
-                // 1. Allocate space in Arena for the Value
-                char* val_ptr = arena.allocate(val_view.length());
-
-                if (val_ptr) {
-                    // 2. Copy data (memcpy is extremely fast)
-                    std::memcpy(val_ptr, val_view.data(), val_view.length());
-
-                    // 3. Store the Key (Still allocs key) and View (Zero alloc value)
-                    // Note: For absolute max speed, we'd alloc key in Arena too.
-                    store[std::string(key_view)] = std::string_view(val_ptr, val_view.length());
-
-                    response_buffer.append("+OK\r\n");
-                } else {
-                    response_buffer.append("-ERR OOM\r\n"); // Out of Memory
-                }
+                store[std::string(tokens[1])] = std::string(tokens[2]);
+                response_buffer.append("+OK\r\n");
             }
+
 
             else if (cmd == "GET" && tokens.size() >= 2) 
             {

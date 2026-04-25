@@ -1,6 +1,5 @@
 #pragma once
 #include "socket.hpp"
-#include "arena.hpp"
 #include <unordered_map>
 #include <string>
 #include <string_view>
@@ -15,7 +14,6 @@ private:
 
     Socket server_socket;
     Socket epoll_fd;
-    Arena arena;
     std::unordered_map<std::string, std::string> store;
     std::unordered_map<int, std::unique_ptr<Socket>> clients;
     static constexpr size_t INITIAL_BUF = 8 * 1024;
