@@ -199,7 +199,8 @@ void RedisServer::handle_client_data(int fd)
     // Send everything in ONE System Call
     if (!response_buffer.empty()) 
     {
-        send(fd, response_buffer.data(), response_buffer.size(), 0);
+        buf.write_buf.append(response_buffer);
+        try_flush(fd);
     }
 }
 
@@ -214,14 +215,69 @@ void RedisServer::run()
         
         for (int i = 0; i < nfds; ++i)
         {
-            if (events[i].data.fd == server_socket.get())
+            if (events[i].data.fd == server_socket.get()) 
             {
                 handle_new_connection();
-            }
-            else
+            } 
+            else 
             {
-                handle_client_data(events[i].data.fd);
+                if (events[i].events & EPOLLIN)  handle_client_data(events[i].data.fd);
+                if (events[i].events & EPOLLOUT) handle_client_writable(events[i].data.fd);
             }
+
         }
     }
+}
+
+void RedisServer::try_flush(int fd)
+{
+    auto it = client_buffers.find(fd);
+    if (it == client_buffers.end()) return;
+    ClientBuffer& buf = it->second;
+
+    while (buf.write_pos < buf.write_buf.size())
+    {
+        const char* p = buf.write_buf.data() + buf.write_pos;
+        size_t n = buf.write_buf.size() - buf.write_pos;
+        ssize_t w = send( fd, p, n, MSG_NOSIGNAL );
+
+        if (w>0)
+        {
+            buf.write_pos += static_cast < size_t> (w);
+            continue;
+        }
+
+        if (w == -1 && errno == EINTR ) continue;
+        if (w == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        {
+            arm_epollout (fd, true);
+            return;
+        }
+        // real error - close connection
+
+        epoll_ctl( epoll_fd.get(), EPOLL_CTL_DEL, fd, nullptr);
+        clients.erase(fd);
+        client_buffers.erase(fd);
+        return;
+    }
+    //fully drained - reclaim memory and stop watching EPOLLOUT
+    buf.write_buf.clear();
+    buf.write_pos = 0;
+    arm_epollout(fd, false);
+}
+
+void RedisServer::arm_epollout(int fd, bool on)
+{
+    ClientBuffer& buf = client_buffers[fd];
+    if (buf.epollout_armed == on) return;
+    struct epoll_event ev{};
+    ev.events = EPOLLIN | EPOLLET | (on ? EPOLLOUT : 0);
+    ev.data.fd = fd;
+    epoll_ctl(epoll_fd.get(), EPOLL_CTL_MOD, fd, &ev);
+    buf.epollout_armed = on;
+}
+
+void RedisServer::handle_client_writable(int fd)
+{
+    try_flush(fd);
 }
